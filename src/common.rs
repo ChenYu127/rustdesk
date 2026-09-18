@@ -2776,6 +2776,14 @@ pub async fn get_ipv6_socket() -> Option<(Arc<UdpSocket>, bytes::Bytes)> {
     match UdpSocket::bind(addr).await {
         Err(err) => {
             log::warn!("Failed to create UDP socket for IPv6: {err}");
+            // The address is gone - a temporary one rotated out, or the network changed. Drop it:
+            // a probe that finds nothing leaves the cache as it is, so the dead address would be
+            // handed back until some later probe succeeds. Only it: a probe may have replaced it
+            // during the bind, and that address is not the one that failed.
+            let mut cached = PUBLIC_IPV6_ADDR.lock().unwrap();
+            if cached.0 == Some(addr) {
+                cached.0 = None;
+            }
         }
         Ok(socket) => {
             if let Ok(local_addr_v6) = socket.local_addr() {
@@ -3415,5 +3423,18 @@ mod tests {
         // `decode_id_pk` is the same blob minus the fingerprint, so the field is invisible to
         // non-WebRTC handshakes.
         assert_eq!(decode_id_pk(&signed, &pk).unwrap(), (id, their_pk));
+    }
+
+    // A cached address the socket can no longer bind is dropped, not handed back for the rest of
+    // its minute. The documentation address is nobody's, so the bind fails wherever this runs.
+    #[tokio::test]
+    async fn test_ipv6_socket_forgets_an_address_it_cannot_bind() {
+        let dead = "[2001:db8::1]:0".parse::<SocketAddr>().unwrap();
+        if UdpSocket::bind(dead).await.is_ok() {
+            return; // net.ipv6.ip_nonlocal_bind binds anything; there is no failure to test
+        }
+        *PUBLIC_IPV6_ADDR.lock().unwrap() = (Some(dead), None);
+        assert!(get_ipv6_socket().await.is_none());
+        assert_eq!(PUBLIC_IPV6_ADDR.lock().unwrap().0, None);
     }
 }
